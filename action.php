@@ -283,13 +283,32 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
             $moves[$old] = $new;
         }
 
+        $handlers = array();
+        $data = array('id' => $id, 'moves' => &$moves, 'handlers' => &$handlers);
+
+        /*
+         * EDITX_HANDLERS REGISTER event:
+         *
+         * Plugin handlers can be registered in the $handlers array, the key is the plugin name as it is given to the handler
+         * The handler needs to be a valid callback, it will get the following parameters:
+         * $match, $state, $pos, $pluginname, $handler. The first three parameters are equivalent to the parameters
+         * of the handle()-function of syntax plugins, the $pluginname is just the plugin name again so handler functions
+         * that handle multiple plugins can distinguish for which the match is. The last parameter is the handler object.
+         * It has the following properties and functions that can be used:
+         * - id, ns: id and namespace of the old page
+         * - new_id, new_ns: new id and namespace (can be identical to id and ns)
+         * - moves: array of moves, the same as $moves in the event
+         * - adaptRelativeId($id): adapts the relative $id according to the moves
+         */
+        trigger_event('EDITX_HANDLERS_REGISTER', $data);
+
         $modes = p_get_parsermodes();
 
         // Create the parser
         $Parser = new Doku_Parser();
 
         // Add the Handler
-        $Parser->Handler = new action_plugin_editx_handler($id, $moves);
+        $Parser->Handler = new action_plugin_editx_handler($id, $moves, $handlers);
 
         //add modes to parser
         foreach($modes as $mode){
@@ -352,54 +371,65 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
 
             // ft_backlinks() is not used here, as it does a hidden page and acl check but we really need all pages
             $affected_pages = idx_get_indexer()->lookupKey('relation_references', array_keys($page_meta['old_ids']));
-            $text = rawWiki($opts['oldpage']);
-            // move meta and attic
-            $this->_apply_moves($opts);
-            // save to newpage
-            $text = $this->_rewrite_content($text, $opts['oldpage'], array($opts['oldpage'] => $opts['newpage']));
-            if ($opts['summary'])
-                $summary = sprintf( $this->getLang('rp_newsummaryx'), $opts['oldpage'], $opts['newpage'], $opts['summary'] );
-            else
-                $summary = sprintf( $this->getLang('rp_newsummary'), $opts['oldpage'], $opts['newpage'] );
-            saveWikiText($opts['newpage'],$text,$summary);
-            // purge or recreate old page
-            $summary = $opts['summary'] ?
-                sprintf( $this->getLang('rp_oldsummaryx'), $opts['oldpage'], $opts['newpage'], $opts['summary'] ) :
-                sprintf( $this->getLang('rp_oldsummary'), $opts['oldpage'], $opts['newpage'] );
-            if ($opts['nr']) {
-                $this->_custom_delete_page( $opts['oldpage'], $summary );
-                // write change log afterwards, or it would be deleted
-                addLogEntry( null, $opts['oldpage'], DOKU_CHANGE_TYPE_DELETE, $summary ); // also writes to global changes
-                unlink(metaFN($opts['oldpage'],'.changes')); // purge page changes
-            }
-            else {
-                $text = $this->getConf('redirecttext');
-                if (!$text) $text = $this->getLang('redirecttext');
-                $text = str_replace( '@ID@', $opts['newpage'], $text );
-                @unlink(wikiFN($opts['oldpage']));  // remove old page file so no additional history
-                saveWikiText($opts['oldpage'],$text,$summary);
-            }
 
-            foreach ($page_meta['old_ids'] as $page_id => $time) {
-                if (!isset($affected_pages[$page_id])) continue;
-                foreach ($affected_pages[$page_id] as $id) {
-                    if (!page_exists($id, '', false) || $id == $page_id || $id == $opts['newpage']) continue;
-                    // if the page has been modified since the rename of the old page, the link in the new page is most
-                    // probably intentionally to the old page and shouldn't be changed
-                    if (filemtime(wikiFN($id, '', false)) > $time) continue;
-                    // we are only interested in persistent metadata, so no need to render anything.
-                    $meta = p_get_metadata($id, 'plugin_editx', METADATA_DONT_RENDER);
-                    if (!$meta) $meta = array('moves' => array());
-                    if (!isset($meta['moves'])) $meta['moves'] = array();
-                    $meta['moves'][$page_id] = $opts['newpage'];
-                    // remove redundant moves (can happen when a page is moved back to its old id)
-                    if ($page_id == $opts['newpage']) unset($meta['moves'][$page_id]);
-                    if (empty($meta['moves'])) unset($meta['moves']);
-                    p_set_metadata($id, array('plugin_editx' => $meta), false, true);
+            $data = array('opts' => &$opts, 'old_ids' => $page_meta['old_ids'], 'affected_pages' => &$affected_pages);
+            // give plugins the option to add their own meta files to the list of files that need to be moved
+            // to the oldfiles/newfiles array or to adjust their own metadata, database, ...
+            // and to add other pages to the affected pages
+            // note that old_ids is in the form 'id' => timestamp of move and affected_pages is indexed by these ids
+            $event = new Doku_Event('EDITX_PAGE_RENAME', $data);
+            if ($event->advise_before()) {
+                $text = rawWiki($opts['oldpage']);
+                // move meta and attic
+                $this->_apply_moves($opts);
+                // save to newpage
+                $text = $this->_rewrite_content($text, $opts['oldpage'], array($opts['oldpage'] => $opts['newpage']));
+                if ($opts['summary'])
+                    $summary = sprintf( $this->getLang('rp_newsummaryx'), $opts['oldpage'], $opts['newpage'], $opts['summary'] );
+                else
+                    $summary = sprintf( $this->getLang('rp_newsummary'), $opts['oldpage'], $opts['newpage'] );
+                saveWikiText($opts['newpage'],$text,$summary);
+                // purge or recreate old page
+                $summary = $opts['summary'] ?
+                    sprintf( $this->getLang('rp_oldsummaryx'), $opts['oldpage'], $opts['newpage'], $opts['summary'] ) :
+                    sprintf( $this->getLang('rp_oldsummary'), $opts['oldpage'], $opts['newpage'] );
+                if ($opts['nr']) {
+                    $this->_custom_delete_page( $opts['oldpage'], $summary );
+                    // write change log afterwards, or it would be deleted
+                    addLogEntry( null, $opts['oldpage'], DOKU_CHANGE_TYPE_DELETE, $summary ); // also writes to global changes
+                    unlink(metaFN($opts['oldpage'],'.changes')); // purge page changes
                 }
+                else {
+                    $text = $this->getConf('redirecttext');
+                    if (!$text) $text = $this->getLang('redirecttext');
+                    $text = str_replace( '@ID@', $opts['newpage'], $text );
+                    @unlink(wikiFN($opts['oldpage']));  // remove old page file so no additional history
+                    saveWikiText($opts['oldpage'],$text,$summary);
+                }
+
+                foreach ($page_meta['old_ids'] as $page_id => $time) {
+                    if (!isset($affected_pages[$page_id])) continue;
+                    foreach ($affected_pages[$page_id] as $id) {
+                        if (!page_exists($id, '', false) || $id == $page_id || $id == $opts['newpage']) continue;
+                        // if the page has been modified since the rename of the old page, the link in the new page is most
+                        // probably intentionally to the old page and shouldn't be changed
+                        if (filemtime(wikiFN($id, '', false)) > $time) continue;
+                        // we are only interested in persistent metadata, so no need to render anything.
+                        $meta = p_get_metadata($id, 'plugin_editx', METADATA_DONT_RENDER);
+                        if (!$meta) $meta = array('moves' => array());
+                        if (!isset($meta['moves'])) $meta['moves'] = array();
+                        $meta['moves'][$page_id] = $opts['newpage'];
+                        // remove redundant moves (can happen when a page is moved back to its old id)
+                        if ($page_id == $opts['newpage']) unset($meta['moves'][$page_id]);
+                        if (empty($meta['moves'])) unset($meta['moves']);
+                        p_set_metadata($id, array('plugin_editx' => $meta), false, true);
+                    }
+                }
+
+                p_set_metadata($opts['newpage'], array('plugin_editx' => $page_meta), false, true);
             }
 
-            p_set_metadata($opts['newpage'], array('plugin_editx' => $page_meta), false, true);
+            $event->advise_after();
         }
         // show messages
         if ($this->errors) {
@@ -533,16 +563,18 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
 
 class action_plugin_editx_handler {
     public $calls = '';
-    private $id;
-    private $ns;
-    private $new_id;
-    private $new_ns;
-    private $moves;
+    public $id;
+    public $ns;
+    public $new_id;
+    public $new_ns;
+    public $moves;
+    private $handlers;
 
-    public function __construct($id, $moves) {
+    public function __construct($id, $moves, $handlers) {
         $this->id = $id;
         $this->ns = getNS($id);
         $this->moves = $moves;
+        $this->handlers = $handlers;
         if (isset($moves[$id])) {
             $this->new_id = $moves[$id];
             $this->new_ns = getNS($moves[$id]);
@@ -582,7 +614,6 @@ class action_plugin_editx_handler {
     }
 
     public function internallink($match, $state, $pos) {
-        global $conf;
         // Strip the opening and closing markup
         $link = preg_replace(array('/^\[\[/','/\]\]$/u'),'',$match);
 
@@ -674,8 +705,11 @@ class action_plugin_editx_handler {
     }
 
     public function plugin($match, $state, $pos, $pluginname) {
-        $this->calls .= $match;
-        // FIXME: handle plugins
+        if (isset($this->handlers[$pluginname])) {
+            $this->calls .= call_user_func($this->handlers[$pluginname], $match, $state, $pos, $pluginname, $this);
+        } else {
+            $this->calls .= $match;
+        }
         return true;
     }
     public function __call($name, $params) {
