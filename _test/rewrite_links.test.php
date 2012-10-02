@@ -66,4 +66,26 @@ class plugin_editx_rewrite_links_test extends DokuWikiTest {
         $editx->_rename_page($opts);
         $this->assertEquals('[[links]] [[test2:editx]] [[test2:eDitX]] [[test2:editx#test]] [[test2:editx?do=edit]]', rawWiki('links'));
     }
+
+    public function test_media_relative() {
+        saveWikiText('editx', '{{ myimage.jpg?nolink&200 |ich!}} {{http://tinyurl.com/asdf?200 |extern}} {{:myphoto.png}} {{test:document.pdf}} {{file.zip|extract this}}', 'Testcase created');
+        /** @var $editx action_plugin_editx */
+        $editx = plugin_load('action', 'editx');
+        $opts['confirm'] = true;
+        $opts['oldpage'] = 'editx';
+        $opts['newpage'] = 'media:test';
+        $editx->_rename_page($opts);
+        $this->assertEquals('{{ :myimage.jpg?nolink&200 |ich!}} {{http://tinyurl.com/asdf?200 |extern}} {{:myphoto.png}} {{test:document.pdf}} {{:file.zip|extract this}}', rawWiki('media:test'));
+    }
+
+    public function test_media_subnamespace() {
+        saveWikiText('test:editx', '{{ myimage.jpg?nolink&200 |ich!}} {{http://tinyurl.com/asdf?200 |extern}} {{:myphoto.png}} {{test:document.pdf}} {{file.zip|extract this}}', 'Testcase created');
+        /** @var $editx action_plugin_editx */
+        $editx = plugin_load('action', 'editx');
+        $opts['confirm'] = true;
+        $opts['oldpage'] = 'test:editx';
+        $opts['newpage'] = 'newmedia:test';
+        $editx->_rename_page($opts);
+        $this->assertEquals('{{ test:myimage.jpg?nolink&200 |ich!}} {{http://tinyurl.com/asdf?200 |extern}} {{:myphoto.png}} {{test:document.pdf}} {{test:file.zip|extract this}}', rawWiki('newmedia:test'));
+    }
 }

@@ -628,62 +628,25 @@ class action_plugin_editx_handler {
                 $params = $parts[1];
             }
 
-            if ($id === '') {
+
+            $new_id = $this->adaptRelativeId($id);
+
+            if ($id == $new_id) {
                 $this->calls .= $match;
-                return true;
-            }
-
-            $abs_id = resolve_id($this->ns, $id, false);
-            $clean_id = cleanID($abs_id);
-            // FIXME this simply assumes that the link pointed to :$conf['start'], but it could also point to another page
-            // resolve_pageid does a lot more here, but we can't really assume this as the original pages might have been
-            // deleted already
-            if (substr($clean_id, -1) === ':')
-                $clean_id .= $conf['start'];
-
-            if (isset($this->moves[$clean_id]) || $this->id !== $this->new_id) {
-                if (isset($this->moves[$clean_id])) {
-                    $new = $this->moves[$clean_id];
-                } else {
-                    $new = $clean_id;
-                }
-                $new_link = $new;
-                $new_ns = getNS($new);
-                // try to keep original pagename
-                if (noNS($new) == noNS($clean_id)) {
-                    if ($new_ns == $this->new_ns) {
-                        $new_link = noNS($id);
-                        if ($id == ':')
-                            $new_link = ':';
-                    } else if ($new_ns != false) {
-                        $new_link = $new_ns.':'.noNS($id);
-                    } else {
-                        $new_link = noNS($id);
-                    }
-                }
-                // TODO: change subnamespaces to relative links
-
-                //msg("Changing $match, clean id is $clean_id, new id is $new, new namespace is $new_ns, new link is $new_link");
-
-                if ($this->new_ns != '' && $new_ns == false) {
-                    $new_link = ':'.$new_link;
-                }
-
+            } else {
                 if ($params !== '') {
-                    $new_link .= '?'.$params;
+                    $new_id.= '?'.$params;
                 }
 
                 if ($hash !== '') {
-                    $new_link .= '#'.$hash;
+                    $new_id .= '#'.$hash;
                 }
 
                 if ($link[1] != NULL) {
-                    $new_link .= '|'.$link[1];
+                    $new_id .= '|'.$link[1];
                 }
 
-                $this->calls .= '[['.$new_link.']]';
-            } else {
-                $this->calls .= $match;
+                $this->calls .= '[['.$new_id.']]';
             }
 
         }
@@ -691,6 +654,25 @@ class action_plugin_editx_handler {
         return true;
 
     }
+
+    public function media($match, $state, $pos) {
+        $p = Doku_Handler_Parse_Media($match);
+        if ($p['type'] == 'internalmedia') {
+            $new_src = $this->adaptRelativeId($p['src']);
+            if ($new_src == $p['src']) {
+                $this->calls .= $match;
+            } else {
+                // do a simple replace of the first match so really only the id is changed and not e.g. the alignment
+                $srcpos = strpos($match, $p['src']);
+                $srclen = strlen($p['src']);
+                $this->calls .= substr_replace($match, $new_src, $srcpos, $srclen);
+            }
+        } else { // external media
+            $this->calls .= $match;
+        }
+        return true;
+    }
+
     public function plugin($match, $state, $pos, $pluginname) {
         $this->calls .= $match;
         // FIXME: handle plugins
@@ -708,6 +690,61 @@ class action_plugin_editx_handler {
     public function _finalize() {
         // remove padding that is added by the parser in parse()
         $this->calls = substr($this->calls, 1, -1);
+    }
+
+    /**
+     * Adapts a link respecting all moves and making it a relative link according to the new id
+     *
+     * @param string $id A relative id
+     * @return string The relative id, adapted according to the new/old id and the moves
+     */
+    public function adaptRelativeId($id) {
+        global $conf;
+
+        if ($id === '') {
+            return $id;
+        }
+
+        $abs_id = resolve_id($this->ns, $id, false);
+        $clean_id = cleanID($abs_id);
+        // FIXME this simply assumes that the link pointed to :$conf['start'], but it could also point to another page
+        // resolve_pageid does a lot more here, but we can't really assume this as the original pages might have been
+        // deleted already
+        if (substr($clean_id, -1) === ':')
+            $clean_id .= $conf['start'];
+
+        if (isset($this->moves[$clean_id]) || $this->id !== $this->new_id) {
+            if (isset($this->moves[$clean_id])) {
+                $new = $this->moves[$clean_id];
+            } else {
+                $new = $clean_id;
+            }
+            $new_link = $new;
+            $new_ns = getNS($new);
+            // try to keep original pagename
+            if (noNS($new) == noNS($clean_id)) {
+                if ($new_ns == $this->new_ns) {
+                    $new_link = noNS($id);
+                    if ($id == ':')
+                        $new_link = ':';
+                } else if ($new_ns != false) {
+                    $new_link = $new_ns.':'.noNS($id);
+                } else {
+                    $new_link = noNS($id);
+                }
+            }
+            // TODO: change subnamespaces to relative links
+
+            //msg("Changing $match, clean id is $clean_id, new id is $new, new namespace is $new_ns, new link is $new_link");
+
+            if ($this->new_ns != '' && $new_ns == false) {
+                $new_link = ':'.$new_link;
+            }
+
+            return $new_link;
+        } else {
+            return $id;
+        }
     }
 }
 // vim:ts=4:sw=4:et:enc=utf-8:
