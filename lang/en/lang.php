@@ -7,6 +7,7 @@
 
 $lang['title']              = '%s Management';
 $lang['redirecttext']       = 'This page is redirected to [[:@ID@]].';
+$lang['rewrite_summary']    = 'Links have been adapted because of page renames';
 
 // rename page = rp
 $lang['rp_title']           = 'Page Rename';

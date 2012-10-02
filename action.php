@@ -16,6 +16,8 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
         $contr->register_hook('TPL_ACT_RENDER', 'BEFORE', $this, '_prepend_to_edit', array());
         $contr->register_hook('ACTION_ACT_PREPROCESS', 'BEFORE', $this, '_handle_act', array());
         $contr->register_hook('TPL_ACT_UNKNOWN', 'BEFORE', $this, '_handle_tpl_act', array());
+        $contr->register_hook('IO_WIKIPAGE_READ', 'AFTER', $this, '_handle_read', array());
+        $contr->register_hook('PARSER_CACHE_USE', 'BEFORE', $this, '_handle_cache', array());
     }
 
     /**
@@ -59,6 +61,46 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
             default:
                 $this->_print_form();
                 break;
+        }
+    }
+
+    function _handle_read(Doku_Event $event, $param) {
+        static $stack = array();
+        // handle only reads of the current revision
+        if ($event->data[3]) return;
+
+        $id = $event->data[2];
+        if ($event->data[1]) $id = $event->data[1].':'.$id;
+        if (isset($stack[$id])) return;
+        $meta = p_get_metadata($id, 'plugin_editx', METADATA_DONT_RENDER);
+        if ($meta && isset($meta['moves'])) {
+            $stack[$id] = true;
+            $event->result = $this->_rewrite_content($event->result, $id, $meta['moves']);
+            $file = wikiFN($id, '', false);
+            if (is_writable($file)) {
+                saveWikiText($id,$event->result,$this->getLang('rewrite_summary'));
+                unset($meta['moves']);
+                p_set_metadata($id, array('plugin_editx' => $meta), false, true);
+            } else { // FIXME: print error here or fail silently?
+                msg('Error: Page '.hsc($id).' needs to be rewritten because of page renames but is not writable.', -1);
+            }
+            unset($stack[$id]);
+        }
+    }
+
+    function _handle_cache(Doku_Event $event, $param) {
+        /** @var $cache cache_parser */
+        $cache = $event->data;
+        $id = $cache->page;
+        if ($id) {
+            $meta = p_get_metadata($id, 'plugin_editx', METADATA_DONT_RENDER);
+            if ($meta && isset($meta['moves'])) {
+                $file = wikiFN($id, '', false);
+                if (is_writable($file))
+                    $cache->depends['purge'] = true;
+                else // FIXME: print error here or fail silently?
+                    msg('Error: Page '.hsc($id).' needs to be rewritten because of page renames but is not writable.', -1);
+            }
         }
     }
 
@@ -302,6 +344,14 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
         }
         // if no error do rename
         if (!$this->errors) {
+            // TODO: add move event
+            $page_meta  = p_get_metadata($opts['oldpage'], 'plugin_editx', METADATA_DONT_RENDER);
+            if (!$page_meta) $page_meta = array();
+            if (!isset($page_meta['old_ids'])) $page_meta['old_ids'] = array();
+            $page_meta['old_ids'][$opts['oldpage']] = time();
+
+            // ft_backlinks() is not used here, as it does a hidden page and acl check but we really need all pages
+            $affected_pages = idx_get_indexer()->lookupKey('relation_references', array_keys($page_meta['old_ids']));
             $text = rawWiki($opts['oldpage']);
             // move meta and attic
             $this->_apply_moves($opts);
@@ -329,6 +379,27 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
                 @unlink(wikiFN($opts['oldpage']));  // remove old page file so no additional history
                 saveWikiText($opts['oldpage'],$text,$summary);
             }
+
+            foreach ($page_meta['old_ids'] as $page_id => $time) {
+                if (!isset($affected_pages[$page_id])) continue;
+                foreach ($affected_pages[$page_id] as $id) {
+                    if (!page_exists($id, '', false) || $id == $page_id || $id == $opts['newpage']) continue;
+                    // if the page has been modified since the rename of the old page, the link in the new page is most
+                    // probably intentionally to the old page and shouldn't be changed
+                    if (filemtime(wikiFN($id, '', false)) > $time) continue;
+                    // we are only interested in persistent metadata, so no need to render anything.
+                    $meta = p_get_metadata($id, 'plugin_editx', METADATA_DONT_RENDER);
+                    if (!$meta) $meta = array('moves' => array());
+                    if (!isset($meta['moves'])) $meta['moves'] = array();
+                    $meta['moves'][$page_id] = $opts['newpage'];
+                    // remove redundant moves (can happen when a page is moved back to its old id)
+                    if ($page_id == $opts['newpage']) unset($meta['moves'][$page_id]);
+                    if (empty($meta['moves'])) unset($meta['moves']);
+                    p_set_metadata($id, array('plugin_editx' => $meta), false, true);
+                }
+            }
+
+            p_set_metadata($opts['newpage'], array('plugin_editx' => $page_meta), false, true);
         }
         // show messages
         if ($this->errors) {
