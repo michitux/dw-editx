@@ -208,6 +208,56 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
     }
 
     /**
+     * @param string $text   The wiki text that shall be rewritten
+     * @param string $id     The id of the wiki page, if the page itself was moved the old id
+     * @param array  $moves  Array of all moves, the keys are the old ids, the values the new ids
+     * @return string        The rewritten wiki text
+     */
+    function _rewrite_content($text, $id, $moves) {
+        // resolve moves of pages that were moved more than once
+        $tmp_moves = array();
+        foreach ($moves as $old => $new) {
+            if ($old != $id && isset($moves[$new]) && $moves[$new] != $new) {
+                // write to temp array in order to correctly handle rename circles
+                $tmp_moves[$old] = $moves[$new];
+            }
+        }
+
+        $changed = !empty($tmp_moves);
+
+        // this correctly resolves rename circles by moving forward one step a time
+        while ($changed) {
+            $changed = false;
+            foreach ($tmp_moves as $old => $new) {
+                if (isset($moves[$new]) && $moves[$new] != $new) {
+                    $tmp_moves[$old] = $moves[$new];
+                    $changed = true;
+                }
+            }
+        }
+
+        // manual merge, we can't use array_merge here as ids can be numeric
+        foreach ($tmp_moves as $old => $new) {
+            $moves[$old] = $new;
+        }
+
+        $modes = p_get_parsermodes();
+
+        // Create the parser
+        $Parser = new Doku_Parser();
+
+        // Add the Handler
+        $Parser->Handler = new action_plugin_editx_handler($id, $moves);
+
+        //add modes to parser
+        foreach($modes as $mode){
+            $Parser->addMode($mode['mode'],$mode['obj']);
+        }
+
+        return $Parser->parse($text);
+    }
+
+    /**
      * main functions
      */
     function _rename_page(&$opts) {
@@ -252,10 +302,11 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
         }
         // if no error do rename
         if (!$this->errors) {
+            $text = rawWiki($opts['oldpage']);
             // move meta and attic
             $this->_apply_moves($opts);
             // save to newpage
-            $text = rawWiki($opts['oldpage']);
+            $text = $this->_rewrite_content($text, $opts['oldpage'], array($opts['oldpage'] => $opts['newpage']));
             if ($opts['summary'])
                 $summary = sprintf( $this->getLang('rp_newsummaryx'), $opts['oldpage'], $opts['newpage'], $opts['summary'] );
             else
@@ -289,7 +340,7 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
         }
         // display form and table
         $data = array( rp_newpage => $opts['newpage'], rp_summary => $opts['summary'], rp_nr => $opts['rp_nr'] );
-        $this->_print_form($data);
+        if (!defined('DOKU_UNITTEST')) $this->_print_form($data);
     }
 
     function _delete_page(&$opts) {
@@ -406,6 +457,186 @@ class action_plugin_editx extends DokuWiki_Action_Plugin {
 ?>
 </div>
 <?php
+    }
+}
+
+class action_plugin_editx_handler {
+    public $calls = '';
+    private $id;
+    private $ns;
+    private $new_id;
+    private $new_ns;
+    private $moves;
+
+    public function __construct($id, $moves) {
+        $this->id = $id;
+        $this->ns = getNS($id);
+        $this->moves = $moves;
+        if (isset($moves[$id])) {
+            $this->new_id = $moves[$id];
+            $this->new_ns = getNS($moves[$id]);
+        } else {
+            $this->new_id = $id;
+            $this->new_ns = $this->ns;
+        }
+    }
+
+    public function camelcaselink($match, $state, $pos) {
+        if ($this->ns)
+            $old = cleanID($this->ns.':'.$match);
+        else
+            $old = cleanID($match);
+        if (isset($this->moves[$old]) || $this->id != $this->new_id) {
+            if (isset($this->moves[$old])) {
+                $new = $this->moves[$old];
+            } else {
+                $new = $old;
+            }
+            $new_ns = getNS($new);
+            // preserve capitalization either in the link or in the title
+            if (noNS($new) == noNS($old)) {
+                // camelcase link still seems to work
+                if ($new_ns == $this->new_ns) {
+                    $this->calls .= $match;
+                } else { // just the namespace was changed, the camelcase word is a valid id
+                    $this->calls .= "[[$new_ns:$match]]";
+                }
+            } else {
+                $this->calls .= "[[$new|$match]]";
+            }
+        } else {
+            $this->calls .= $match;
+        }
+        return true;
+    }
+
+    public function internallink($match, $state, $pos) {
+        global $conf;
+        // Strip the opening and closing markup
+        $link = preg_replace(array('/^\[\[/','/\]\]$/u'),'',$match);
+
+        // Split title from URL
+        $link = explode('|',$link,2);
+        if ( !isset($link[1]) ) {
+            $link[1] = NULL;
+        }
+        $link[0] = trim($link[0]);
+
+
+        //decide which kind of link it is
+
+        if ( preg_match('/^[a-zA-Z0-9\.]+>{1}.*$/u',$link[0]) ) {
+            // Interwiki
+            $this->calls .= $match;
+        }elseif ( preg_match('/^\\\\\\\\[^\\\\]+?\\\\/u',$link[0]) ) {
+            // Windows Share
+            $this->calls .= $match;
+        }elseif ( preg_match('#^([a-z0-9\-\.+]+?)://#i',$link[0]) ) {
+            // external link (accepts all protocols)
+            $this->calls .= $match;
+        }elseif ( preg_match('<'.PREG_PATTERN_VALID_EMAIL.'>',$link[0]) ) {
+            // E-Mail (pattern above is defined in inc/mail.php)
+            $this->calls .= $match;
+        }elseif ( preg_match('!^#.+!',$link[0]) ){
+            // local link
+            $this->calls .= $match;
+        }else{
+            $id = $link[0];
+
+            $hash = '';
+            $parts = explode('#', $id, 2);
+            if (count($parts) === 2) {
+                $id = $parts[0];
+                $hash = $parts[1];
+            }
+
+            $params = '';
+            $parts = explode('?', $id, 2);
+            if (count($parts) === 2) {
+                $id = $parts[0];
+                $params = $parts[1];
+            }
+
+            if ($id === '') {
+                $this->calls .= $match;
+                return true;
+            }
+
+            $abs_id = resolve_id($this->ns, $id, false);
+            $clean_id = cleanID($abs_id);
+            // FIXME this simply assumes that the link pointed to :$conf['start'], but it could also point to another page
+            // resolve_pageid does a lot more here, but we can't really assume this as the original pages might have been
+            // deleted already
+            if (substr($clean_id, -1) === ':')
+                $clean_id .= $conf['start'];
+
+            if (isset($this->moves[$clean_id]) || $this->id !== $this->new_id) {
+                if (isset($this->moves[$clean_id])) {
+                    $new = $this->moves[$clean_id];
+                } else {
+                    $new = $clean_id;
+                }
+                $new_link = $new;
+                $new_ns = getNS($new);
+                // try to keep original pagename
+                if (noNS($new) == noNS($clean_id)) {
+                    if ($new_ns == $this->new_ns) {
+                        $new_link = noNS($id);
+                        if ($id == ':')
+                            $new_link = ':';
+                    } else if ($new_ns != false) {
+                        $new_link = $new_ns.':'.noNS($id);
+                    } else {
+                        $new_link = noNS($id);
+                    }
+                }
+                // TODO: change subnamespaces to relative links
+
+                //msg("Changing $match, clean id is $clean_id, new id is $new, new namespace is $new_ns, new link is $new_link");
+
+                if ($this->new_ns != '' && $new_ns == false) {
+                    $new_link = ':'.$new_link;
+                }
+
+                if ($params !== '') {
+                    $new_link .= '?'.$params;
+                }
+
+                if ($hash !== '') {
+                    $new_link .= '#'.$hash;
+                }
+
+                if ($link[1] != NULL) {
+                    $new_link .= '|'.$link[1];
+                }
+
+                $this->calls .= '[['.$new_link.']]';
+            } else {
+                $this->calls .= $match;
+            }
+
+        }
+
+        return true;
+
+    }
+    public function plugin($match, $state, $pos, $pluginname) {
+        $this->calls .= $match;
+        // FIXME: handle plugins
+        return true;
+    }
+    public function __call($name, $params) {
+        if (count($params) == 3) {
+            $this->calls .= $params[0];
+            return true;
+        } else {
+            trigger_error('Error, handler function '.hsc($name).' with '.count($params).' parameters called which isn\'t implemented', E_USER_ERROR);
+        }
+    }
+
+    public function _finalize() {
+        // remove padding that is added by the parser in parse()
+        $this->calls = substr($this->calls, 1, -1);
     }
 }
 // vim:ts=4:sw=4:et:enc=utf-8:
